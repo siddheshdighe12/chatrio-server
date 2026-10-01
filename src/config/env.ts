@@ -15,6 +15,10 @@ const envSchema = z.object({
   STORAGE_REGION: z.string().default('us-east-1'),
   STORAGE_ACCESS_KEY: z.string().optional(),
   STORAGE_SECRET_KEY: z.string().optional(),
+
+  SUPABASE_URL: z.string().optional(),
+  SUPABASE_SECRET_KEY: z.string().optional(),
+  SUPABASE_STORAGE_BUCKET: z.string().default('chatrio-media'),
   // Expo push notifications (optional in dev, recommended in production)
   EXPO_ACCESS_TOKEN: z.string().optional(),
 });

@@ -1,8 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import fs from 'fs';
-import path from 'path';
-import { pipeline } from 'stream/promises';
 import { v4 as uuidv4 } from 'uuid';
+import { createClient } from '@supabase/supabase-js';
 import { authenticate } from '../middleware/auth.middleware.js';
 import { env } from '../config/env.js';
 
@@ -12,38 +10,75 @@ export async function uploadRoutes(app: FastifyInstance) {
     { preHandler: [authenticate] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const data = await request.file();
+
       if (!data) {
         return reply.status(400).send({ error: 'No file uploaded' });
       }
 
-      const uploadsDir = path.resolve(process.cwd(), 'uploads');
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
+      if (!env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) {
+        return reply.status(500).send({
+          error: 'Supabase Storage is not configured',
+        });
       }
 
-      const ext = path.extname(data.filename) || '';
-      const uniqueName = `${uuidv4()}${ext}`;
-      const filePath = path.join(uploadsDir, uniqueName);
+      try {
+        const supabase = createClient(
+          env.SUPABASE_URL,
+          env.SUPABASE_SECRET_KEY,
+          {
+            auth: {
+              persistSession: false,
+              autoRefreshToken: false,
+            },
+          }
+        );
 
-      // Stream file to disk
-      await pipeline(data.file, fs.createWriteStream(filePath));
+        const ext = data.filename.includes('.')
+          ? `.${data.filename.split('.').pop()}`
+          : '';
 
-      const stats = fs.statSync(filePath);
-      const isImage = data.mimetype.startsWith('image/');
-      const fileType = isImage ? 'IMAGE' : 'FILE';
+        const uniqueName = `${uuidv4()}${ext}`;
+        const storagePath = `uploads/${uniqueName}`;
 
-      // Build file URL accessible over HTTP
-      const host = request.headers.host || `localhost:${env.PORT}`;
-      const protocol = request.protocol || 'http';
-      const fileUrl = `${protocol}://${host}/uploads/${uniqueName}`;
+        const fileBuffer = await data.toBuffer();
 
-      return reply.status(201).send({
-        url: fileUrl,
-        fileName: data.filename,
-        mimeType: data.mimetype,
-        size: stats.size,
-        type: fileType,
-      });
+        const { error } = await supabase.storage
+          .from(env.SUPABASE_STORAGE_BUCKET)
+          .upload(storagePath, fileBuffer, {
+            contentType: data.mimetype,
+            cacheControl: '31536000',
+            upsert: false,
+          });
+
+        if (error) {
+          request.log.error(error, 'Supabase Storage upload failed');
+
+          return reply.status(500).send({
+            error: 'Failed to upload file',
+          });
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from(env.SUPABASE_STORAGE_BUCKET)
+          .getPublicUrl(storagePath);
+
+        const isImage = data.mimetype.startsWith('image/');
+        const fileType = isImage ? 'IMAGE' : 'FILE';
+
+        return reply.status(201).send({
+          url: publicUrlData.publicUrl,
+          fileName: data.filename,
+          mimeType: data.mimetype,
+          size: fileBuffer.length,
+          type: fileType,
+        });
+      } catch (error) {
+        request.log.error(error, 'Upload failed');
+
+        return reply.status(500).send({
+          error: 'Failed to upload file',
+        });
+      }
     }
   );
 }
