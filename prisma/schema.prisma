@@ -1,0 +1,235 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+ provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(uuid())
+  username    String   @unique
+  email       String   @unique
+  password    String
+  displayName String
+  bio         String?
+  avatarUrl   String?
+  isOnline    Boolean  @default(false)
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  showReadReceipts Boolean @default(true)
+  showTypingStatus Boolean @default(true)
+
+  refreshTokens       RefreshToken[]
+  pushTokens          PushToken[]
+  conversationMembers ConversationMember[]
+  sentMessages        Message[]            @relation("SentMessages")
+  messageReactions    MessageReaction[]
+  messageReads        MessageRead[]
+  messageDeliveries   MessageDelivery[]
+  blockedUsers        BlockedUser[]        @relation("UserBlocks")
+  blockedBy           BlockedUser[]        @relation("UserBlockedBy")
+
+  @@index([username])
+  @@index([email])
+  @@index([isOnline])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  token     String    @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model PushToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String
+  deviceId  String
+  platform  String   @default("android") // android | ios
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+  @@map("push_tokens")
+}
+
+model Conversation {
+  id          String   @id @default(uuid())
+  type        String   @default("DIRECT") // DIRECT | GROUP
+  name        String?  // Group name (null for direct)
+  avatarUrl   String?  // Group avatar
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members  ConversationMember[]
+  messages Message[]
+
+  @@index([type])
+  @@index([updatedAt])
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id             String    @id @default(uuid())
+  conversationId String
+  userId         String
+  role           String    @default("MEMBER") // MEMBER | ADMIN | OWNER
+  joinedAt       DateTime  @default(now())
+  leftAt         DateTime?
+  isActive       Boolean   @default(true)
+  isMuted        Boolean   @default(false)
+  isPinned       Boolean   @default(false)
+  isArchived     Boolean   @default(false)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([conversationId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id             String    @id @default(uuid())
+  conversationId String
+  senderId       String?
+  type           String    @default("TEXT") // TEXT | IMAGE | FILE | SYSTEM | DELETED
+  content        String?
+  status         String    @default("SENT") // SENDING | SENT | DELIVERED | READ | FAILED
+  isEdited       Boolean   @default(false)
+  editedAt       DateTime?
+  isDeleted      Boolean   @default(false)
+  deletedAt      DateTime?
+  deletedForUserIds String? @default("[]")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  replyToId String?
+  replyTo   Message?  @relation("Replies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   Message[] @relation("Replies")
+
+  metadata String? // JSON string
+
+  conversation      Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender            User?             @relation("SentMessages", fields: [senderId], references: [id], onDelete: SetNull)
+  attachments       Attachment[]
+  reactions         MessageReaction[]
+  readBy            MessageRead[]
+  deliveredTo       MessageDelivery[]
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+  @@index([conversationId, isDeleted])
+  @@map("messages")
+}
+
+model MessageReaction {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@map("message_reactions")
+}
+
+model MessageRead {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  readAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@index([userId])
+  @@map("message_reads")
+}
+
+model MessageDelivery {
+  id          String   @id @default(uuid())
+  messageId   String
+  userId      String
+  deliveredAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@map("message_deliveries")
+}
+
+model Attachment {
+  id         String   @id @default(uuid())
+  messageId  String
+  type       String   @default("IMAGE") // IMAGE | VIDEO | AUDIO | FILE
+  fileName   String
+  mimeType   String
+  size       Int
+  storageKey String
+  url        String
+  width      Int?
+  height     Int?
+  duration   Int?
+  createdAt  DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@map("attachments")
+}
+
+model BlockedUser {
+  id        String   @id @default(uuid())
+  userId    String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  user    User @relation("UserBlocks", fields: [userId], references: [id], onDelete: Cascade)
+  blocked User @relation("UserBlockedBy", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, blockedId])
+  @@index([userId])
+  @@index([blockedId])
+  @@map("blocked_users")
+}
+
+model Report {
+  id         String   @id @default(uuid())
+  reporterId String
+  targetId   String
+  targetType String   @default("USER") // USER | MESSAGE | CONVERSATION
+  reason     String
+  createdAt  DateTime @default(now())
+
+  @@index([reporterId])
+  @@index([targetId])
+  @@map("reports")
+}
