@@ -26,32 +26,40 @@ async function main() {
     // ──────────────────────────────────────────────
     // Supabase DNS diagnostics
     // ──────────────────────────────────────────────
-    try {
-      const systemDns = await dns.lookup(
-        'uazduvgqosvocauawccv.supabase.co'
-      );
 
-      console.log('🔎 System DNS:', systemDns);
-    } catch (error) {
-      console.error('❌ System DNS failed:', error);
-    }
+    const hosts = [
+      'uazduvgqosvocauawccv.supabase.co',
+      'uazduvgqosvocauawccv.storage.supabase.co',
+    ];
 
-    try {
-      const resolver = new dns.Resolver();
-      resolver.setServers(['8.8.8.8']);
+    for (const hostname of hosts) {
+      // Test Render's default DNS resolver
+      try {
+        const systemDns = await dns.lookup(hostname);
 
-      const googleDns = await resolver.resolve4(
-        'uazduvgqosvocauawccv.supabase.co'
-      );
+        console.log(`🔎 System DNS ${hostname}:`, systemDns);
+      } catch (error) {
+        console.error(`❌ System DNS failed ${hostname}:`, error);
+      }
 
-      console.log('🔎 Google DNS:', googleDns);
-    } catch (error) {
-      console.error('❌ Google DNS failed:', error);
+      // Test Google DNS directly
+      try {
+        const resolver = new dns.Resolver();
+
+        resolver.setServers(['8.8.8.8']);
+
+        const googleDns = await resolver.resolve4(hostname);
+
+        console.log(`🔎 Google DNS ${hostname}:`, googleDns);
+      } catch (error) {
+        console.error(`❌ Google DNS failed ${hostname}:`, error);
+      }
     }
 
     // ──────────────────────────────────────────────
     // Start server
     // ──────────────────────────────────────────────
+
     await app.listen({
       port: env.PORT,
       host: '0.0.0.0',
