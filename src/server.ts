@@ -24,16 +24,29 @@ async function main() {
 
   try {
     // ──────────────────────────────────────────────
-    // Supabase DNS diagnostic
+    // Supabase DNS diagnostics
     // ──────────────────────────────────────────────
     try {
-      const dnsResult = await dns.lookup(
+      const systemDns = await dns.lookup(
         'uazduvgqosvocauawccv.supabase.co'
       );
 
-      console.log('🔎 Supabase DNS:', dnsResult);
+      console.log('🔎 System DNS:', systemDns);
     } catch (error) {
-      console.error('❌ Supabase DNS failed:', error);
+      console.error('❌ System DNS failed:', error);
+    }
+
+    try {
+      const resolver = new dns.Resolver();
+      resolver.setServers(['8.8.8.8']);
+
+      const googleDns = await resolver.resolve4(
+        'uazduvgqosvocauawccv.supabase.co'
+      );
+
+      console.log('🔎 Google DNS:', googleDns);
+    } catch (error) {
+      console.error('❌ Google DNS failed:', error);
     }
 
     // ──────────────────────────────────────────────
