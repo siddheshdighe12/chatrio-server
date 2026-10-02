@@ -1,4 +1,8 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type {
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+} from 'fastify';
 import { v4 as uuidv4 } from 'uuid';
 import { createClient } from '@supabase/supabase-js';
 import { authenticate } from '../middleware/auth.middleware.js';
@@ -12,18 +16,35 @@ export async function uploadRoutes(app: FastifyInstance) {
       const data = await request.file();
 
       if (!data) {
-        return reply.status(400).send({ error: 'No file uploaded' });
+        return reply.status(400).send({
+          error: 'No file uploaded',
+        });
       }
 
-      if (!env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) {
+      if (
+        !env.SUPABASE_URL ||
+        !env.SUPABASE_SECRET_KEY ||
+        !env.SUPABASE_STORAGE_URL
+      ) {
+        request.log.error(
+          {
+            hasSupabaseUrl: !!env.SUPABASE_URL,
+            hasSupabaseSecretKey: !!env.SUPABASE_SECRET_KEY,
+            hasSupabaseStorageUrl: !!env.SUPABASE_STORAGE_URL,
+          },
+          'Supabase Storage is not fully configured'
+        );
+
         return reply.status(500).send({
           error: 'Supabase Storage is not configured',
         });
       }
 
       try {
+        // Use the dedicated Storage hostname because Render
+        // can resolve this hostname correctly.
         const supabase = createClient(
-          env.SUPABASE_URL,
+          env.SUPABASE_STORAGE_URL,
           env.SUPABASE_SECRET_KEY,
           {
             auth: {
@@ -51,7 +72,10 @@ export async function uploadRoutes(app: FastifyInstance) {
           });
 
         if (error) {
-          request.log.error(error, 'Supabase Storage upload failed');
+          request.log.error(
+            error,
+            'Supabase Storage upload failed'
+          );
 
           return reply.status(500).send({
             error: 'Failed to upload file',
@@ -67,6 +91,7 @@ export async function uploadRoutes(app: FastifyInstance) {
 
         return reply.status(201).send({
           url: publicUrlData.publicUrl,
+          storageKey: storagePath,
           fileName: data.filename,
           mimeType: data.mimetype,
           size: fileBuffer.length,
