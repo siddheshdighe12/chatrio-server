@@ -173,14 +173,23 @@ export async function uploadAvatarHandler(request: FastifyRequest, reply: Fastif
   try {
     let avatarUrl: string;
 
-    if (env.SUPABASE_SECRET_KEY && env.SUPABASE_STORAGE_URL) {
+    if (env.SUPABASE_SECRET_KEY && (env.SUPABASE_URL || env.SUPABASE_STORAGE_URL)) {
       // ── Upload to Supabase Storage (production path) ────────────────
+      // Use SUPABASE_URL (https://<ref>.supabase.co) as the base — the
+      // Storage API lives at <project-url>/storage/v1/...
+      // Auto-correct *.storage.supabase.co and legacy typo for robust resilience
+      const rawStorageBase = env.SUPABASE_URL || env.SUPABASE_STORAGE_URL!;
+      const storageBaseUrl = rawStorageBase
+        .trim()
+        .replace(/\.storage\.supabase\.co/i, '.supabase.co')
+        .replace('uazduvgqosvocauawccv', 'uazduvqosvocaauawccv')
+        .replace(/\/+$/, '');
+
       const fileBuffer = await data.toBuffer();
       const ext = path.extname(data.filename) || '.jpg';
       const uniqueName = `avatar_${uuidv4()}${ext}`;
       const storagePath = `avatars/${uniqueName}`;
 
-      const storageBaseUrl = env.SUPABASE_STORAGE_URL.replace(/\/+$/, '');
       const uploadUrl =
         `${storageBaseUrl}/storage/v1/object/` +
         `${encodeURIComponent(env.SUPABASE_STORAGE_BUCKET)}/` +
@@ -190,7 +199,13 @@ export async function uploadAvatarHandler(request: FastifyRequest, reply: Fastif
           .join('/')}`;
 
       request.log.info(
-        { storagePath, bucket: env.SUPABASE_STORAGE_BUCKET, mimeType: data.mimetype, size: fileBuffer.length },
+        {
+          storagePath,
+          bucket: env.SUPABASE_STORAGE_BUCKET,
+          mimeType: data.mimetype,
+          size: fileBuffer.length,
+          storageHost: new URL(storageBaseUrl).host,
+        },
         'Uploading avatar to Supabase Storage'
       );
 

@@ -34,13 +34,20 @@ export async function uploadRoutes(app: FastifyInstance) {
           });
         }
 
-        if (!env.SUPABASE_SECRET_KEY || !env.SUPABASE_STORAGE_URL) {
+        // SUPABASE_URL  → https://<ref>.supabase.co  (standard project URL, preferred)
+        // SUPABASE_STORAGE_URL → explicit override (set this ONLY if you know it's correct)
+        // Supabase Storage API lives at <project-url>/storage/v1/...
+        // Using *.storage.supabase.co instead causes HTTP 400 "Project not specified".
+        const rawStorageBase = env.SUPABASE_URL || env.SUPABASE_STORAGE_URL;
+
+        if (!env.SUPABASE_SECRET_KEY || !rawStorageBase) {
           request.log.error(
             {
               hasSupabaseSecretKey: !!env.SUPABASE_SECRET_KEY,
+              hasSupabaseUrl: !!env.SUPABASE_URL,
               hasSupabaseStorageUrl: !!env.SUPABASE_STORAGE_URL,
             },
-            'Supabase Storage is not fully configured'
+            'Supabase Storage is not fully configured — set SUPABASE_URL and SUPABASE_SECRET_KEY'
           );
 
           return reply.status(500).send({
@@ -57,7 +64,13 @@ export async function uploadRoutes(app: FastifyInstance) {
         const uniqueName = `${uuidv4()}${ext}`;
         const storagePath = `uploads/${uniqueName}`;
 
-        const storageBaseUrl = env.SUPABASE_STORAGE_URL.replace(/\/+$/, '');
+        // Standard Supabase Storage REST endpoint is https://<ref>.supabase.co/storage/v1/...
+        // Auto-correct *.storage.supabase.co and legacy typo for robust resilience
+        const storageBaseUrl = rawStorageBase
+          .trim()
+          .replace(/\.storage\.supabase\.co/i, '.supabase.co')
+          .replace('uazduvgqosvocauawccv', 'uazduvqosvocaauawccv')
+          .replace(/\/+$/, '');
 
         const uploadUrl =
           `${storageBaseUrl}/storage/v1/object/` +
@@ -73,6 +86,8 @@ export async function uploadRoutes(app: FastifyInstance) {
             bucket: env.SUPABASE_STORAGE_BUCKET,
             mimeType: data.mimetype,
             size: fileBuffer.length,
+            // Log the host only (no credentials) for diagnostics
+            storageHost: new URL(storageBaseUrl).host,
           },
           'Uploading file to Supabase Storage'
         );
