@@ -148,7 +148,20 @@ export async function uploadAvatarHandler(request: FastifyRequest, reply: Fastif
     return reply.status(401).send({ error: 'Unauthorized' });
   }
 
-  const data = await request.file();
+  let data;
+  try {
+    data = await request.file();
+  } catch (parseError) {
+    request.log.error(
+      { err: parseError },
+      'Failed to parse avatar multipart upload — check that the request has a valid multipart boundary'
+    );
+    return reply.status(400).send({
+      error: 'Invalid multipart request',
+      details: parseError instanceof Error ? parseError.message : String(parseError),
+    });
+  }
+
   if (!data) {
     return reply.status(400).send({ error: 'No file uploaded' });
   }
@@ -157,41 +170,100 @@ export async function uploadAvatarHandler(request: FastifyRequest, reply: Fastif
     return reply.status(400).send({ error: 'Only image files are allowed' });
   }
 
-  const uploadsDir = path.resolve(process.cwd(), 'uploads');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+  try {
+    let avatarUrl: string;
+
+    if (env.SUPABASE_SECRET_KEY && env.SUPABASE_STORAGE_URL) {
+      // ── Upload to Supabase Storage (production path) ────────────────
+      const fileBuffer = await data.toBuffer();
+      const ext = path.extname(data.filename) || '.jpg';
+      const uniqueName = `avatar_${uuidv4()}${ext}`;
+      const storagePath = `avatars/${uniqueName}`;
+
+      const storageBaseUrl = env.SUPABASE_STORAGE_URL.replace(/\/+$/, '');
+      const uploadUrl =
+        `${storageBaseUrl}/storage/v1/object/` +
+        `${encodeURIComponent(env.SUPABASE_STORAGE_BUCKET)}/` +
+        `${storagePath
+          .split('/')
+          .map((part) => encodeURIComponent(part))
+          .join('/')}`;
+
+      request.log.info(
+        { storagePath, bucket: env.SUPABASE_STORAGE_BUCKET, mimeType: data.mimetype, size: fileBuffer.length },
+        'Uploading avatar to Supabase Storage'
+      );
+
+      const storageResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_SECRET_KEY,
+          Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}`,
+          'Content-Type': data.mimetype,
+          'Cache-Control': '31536000',
+        },
+        body: fileBuffer,
+      });
+
+      const responseText = await storageResponse.text();
+
+      if (!storageResponse.ok) {
+        request.log.error(
+          { status: storageResponse.status, response: responseText, uploadUrl },
+          'Supabase Storage avatar upload failed'
+        );
+        return reply.status(500).send({ error: 'Failed to upload avatar', details: responseText });
+      }
+
+      avatarUrl =
+        `${storageBaseUrl}/storage/v1/object/public/` +
+        `${encodeURIComponent(env.SUPABASE_STORAGE_BUCKET)}/` +
+        `${storagePath
+          .split('/')
+          .map((part) => encodeURIComponent(part))
+          .join('/')}`;
+    } else {
+      // ── Fallback: local disk (development only) ─────────────────────
+      const uploadsDir = path.resolve(process.cwd(), 'uploads');
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+
+      const ext = path.extname(data.filename) || '.jpg';
+      const uniqueName = `avatar_${uuidv4()}${ext}`;
+      const filePath = path.join(uploadsDir, uniqueName);
+
+      await pipeline(data.file, fs.createWriteStream(filePath));
+
+      const host = request.headers.host || `localhost:${env.PORT}`;
+      const protocol = request.protocol || 'http';
+      avatarUrl = `${protocol}://${host}/uploads/${uniqueName}`;
+    }
+
+    // Update DB
+    const updated = await prisma.user.update({
+      where: { id: currentUserId },
+      data: { avatarUrl },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        avatarUrl: true,
+      },
+    });
+
+    // Broadcast to all conversation rooms so other clients update immediately
+    await broadcastToUserConversations(currentUserId, 'user:profile_updated', {
+      userId: currentUserId,
+      avatarUrl,
+      displayName: updated.displayName,
+    });
+
+    return reply.send({ avatarUrl });
+  } catch (error) {
+    request.log.error({ err: error }, 'Avatar upload failed');
+    return reply.status(500).send({ error: 'Failed to upload avatar' });
   }
-
-  const ext = path.extname(data.filename) || '.jpg';
-  const uniqueName = `avatar_${uuidv4()}${ext}`;
-  const filePath = path.join(uploadsDir, uniqueName);
-
-  await pipeline(data.file, fs.createWriteStream(filePath));
-
-  const host = request.headers.host || `localhost:${env.PORT}`;
-  const protocol = request.protocol || 'http';
-  const avatarUrl = `${protocol}://${host}/uploads/${uniqueName}`;
-
-  // Update DB
-  const updated = await prisma.user.update({
-    where: { id: currentUserId },
-    data: { avatarUrl },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      avatarUrl: true,
-    },
-  });
-
-  // Broadcast to all conversation rooms so other clients update immediately
-  await broadcastToUserConversations(currentUserId, 'user:profile_updated', {
-    userId: currentUserId,
-    avatarUrl,
-    displayName: updated.displayName,
-  });
-
-  return reply.send({ avatarUrl });
 }
 
 export async function deleteAvatarHandler(request: FastifyRequest, reply: FastifyReply) {

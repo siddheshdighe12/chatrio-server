@@ -12,29 +12,42 @@ export async function uploadRoutes(app: FastifyInstance) {
     '/upload',
     { preHandler: [authenticate] },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const data = await request.file();
-
-      if (!data) {
-        return reply.status(400).send({
-          error: 'No file uploaded',
-        });
-      }
-
-      if (!env.SUPABASE_SECRET_KEY || !env.SUPABASE_STORAGE_URL) {
-        request.log.error(
-          {
-            hasSupabaseSecretKey: !!env.SUPABASE_SECRET_KEY,
-            hasSupabaseStorageUrl: !!env.SUPABASE_STORAGE_URL,
-          },
-          'Supabase Storage is not fully configured'
-        );
-
-        return reply.status(500).send({
-          error: 'Supabase Storage is not configured',
-        });
-      }
-
       try {
+        let data;
+        try {
+          data = await request.file();
+        } catch (parseError) {
+          request.log.error(
+            { err: parseError },
+            'Failed to parse multipart upload — check that the request has a valid multipart boundary'
+          );
+          return reply.status(400).send({
+            error: 'Invalid multipart request',
+            details:
+              parseError instanceof Error ? parseError.message : String(parseError),
+          });
+        }
+
+        if (!data) {
+          return reply.status(400).send({
+            error: 'No file uploaded',
+          });
+        }
+
+        if (!env.SUPABASE_SECRET_KEY || !env.SUPABASE_STORAGE_URL) {
+          request.log.error(
+            {
+              hasSupabaseSecretKey: !!env.SUPABASE_SECRET_KEY,
+              hasSupabaseStorageUrl: !!env.SUPABASE_STORAGE_URL,
+            },
+            'Supabase Storage is not fully configured'
+          );
+
+          return reply.status(500).send({
+            error: 'Supabase Storage is not configured',
+          });
+        }
+
         const fileBuffer = await data.toBuffer();
 
         const ext = data.filename.includes('.')
@@ -125,7 +138,7 @@ export async function uploadRoutes(app: FastifyInstance) {
         });
       } catch (error) {
         request.log.error(
-          error,
+          { err: error },
           'Upload failed'
         );
 
@@ -134,5 +147,6 @@ export async function uploadRoutes(app: FastifyInstance) {
         });
       }
     }
+
   );
 }
