@@ -11,10 +11,16 @@ export function normalizeMediaUrl(url: string | null | undefined, request?: Fast
 
   const uploadIndex = url.indexOf('/uploads/');
   if (uploadIndex !== -1) {
-    const uploadPath = url.substring(uploadIndex);
-    const host = request?.headers?.host || `localhost:${env.PORT}`;
-    const protocol = request?.protocol || 'http';
-    return `${protocol}://${host}${uploadPath}`;
+    // Only rewrite if the URL is relative (no scheme) or points to the current server host.
+    // External absolute URLs (e.g., Supabase CDN) that happen to contain /uploads/ in their
+    // path must NOT be rewritten — they are already correct public CDN URLs.
+    const isAbsoluteExternal = /^https?:\/\//i.test(url);
+    if (!isAbsoluteExternal) {
+      const uploadPath = url.substring(uploadIndex);
+      const host = request?.headers?.host || `localhost:${env.PORT}`;
+      const protocol = request?.protocol || 'http';
+      return `${protocol}://${host}${uploadPath}`;
+    }
   }
 
   return url;
