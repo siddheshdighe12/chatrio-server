@@ -31,3 +31,19 @@ export enum AttachmentType {
   AUDIO = 'AUDIO',
   FILE = 'FILE',
 }
+
+export enum CallType {
+  AUDIO = 'AUDIO',
+  VIDEO = 'VIDEO',
+}
+
+export enum CallStatus {
+  RINGING   = 'RINGING',
+  ACTIVE    = 'ACTIVE',
+  ENDED     = 'ENDED',
+  DECLINED  = 'DECLINED',
+  CANCELLED = 'CANCELLED',
+  MISSED    = 'MISSED',
+  FAILED    = 'FAILED',
+}
+

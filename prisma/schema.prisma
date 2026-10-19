@@ -32,6 +32,8 @@ model User {
   messageDeliveries   MessageDelivery[]
   blockedUsers        BlockedUser[]        @relation("UserBlocks")
   blockedBy           BlockedUser[]        @relation("UserBlockedBy")
+  callerCalls         Call[]               @relation("CallerCalls")
+  recipientCalls      Call[]               @relation("RecipientCalls")
 
   @@index([username])
   @@index([email])
@@ -81,6 +83,7 @@ model Conversation {
 
   members  ConversationMember[]
   messages Message[]
+  calls    Call[]
 
   @@index([type])
   @@index([updatedAt])
@@ -232,4 +235,32 @@ model Report {
   @@index([reporterId])
   @@index([targetId])
   @@map("reports")
+}
+
+// ── Voice / Video Calls ──────────────────────────────────────────────────────
+
+model Call {
+  id             String    @id @default(uuid())
+  conversationId String
+  callerId       String
+  recipientId    String
+  callType       String    @default("AUDIO")   // AUDIO | VIDEO
+  status         String    @default("RINGING") // RINGING | ACTIVE | ENDED | DECLINED | CANCELLED | MISSED | FAILED
+  livekitRoom    String    @unique              // room name = call id
+  startedAt      DateTime?                     // set when both sides connect (ACTIVE)
+  endedAt        DateTime?
+  duration       Int?                          // seconds; set on terminal state
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  caller       User         @relation("CallerCalls",    fields: [callerId],    references: [id])
+  recipient    User         @relation("RecipientCalls", fields: [recipientId], references: [id])
+
+  @@index([conversationId])
+  @@index([callerId])
+  @@index([recipientId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("calls")
 }

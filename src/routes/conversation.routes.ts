@@ -16,6 +16,7 @@ import {
   updateMemberRoleHandler,
   leaveGroupHandler,
 } from '../controllers/conversation.controller.js';
+import { getCallHistoryHandler } from '../controllers/call.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
 
 export async function conversationRoutes(app: FastifyInstance) {
@@ -25,6 +26,7 @@ export async function conversationRoutes(app: FastifyInstance) {
   app.post('/direct', getOrCreateDirectHandler);
   app.post('/group', createGroupHandler);
   app.get('/:id', getConversationHandler);
+  app.get('/:id/calls', getCallHistoryHandler);
   app.patch('/:id', updateGroupHandler);
   app.patch('/:id/pin', pinConversationHandler);
   app.patch('/:id/mute', muteConversationHandler);

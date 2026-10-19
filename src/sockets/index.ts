@@ -2,8 +2,9 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../config/prisma.js';
 import { env } from '../config/env.js';
-import { MessageStatus, MessageType } from '../types/database.js';
+import { MessageStatus, MessageType, CallStatus } from '../types/database.js';
 import { notifyConversationRecipients } from '../services/pushNotification.service.js';
+import { clearRingTimeout } from '../services/call.service.js';
 
 interface AuthenticatedSocket extends Socket {
   data: {
@@ -495,6 +496,23 @@ export function setupSockets(app: FastifyInstance): SocketIOServer {
         }
       }
     );
+
+    // Call busy response from recipient
+    socket.on('call:busy', async ({ callId }: { callId: string }) => {
+      try {
+        const call = await prisma.call.findUnique({ where: { id: callId } });
+        if (call && call.status === CallStatus.RINGING) {
+          await prisma.call.update({
+            where: { id: callId },
+            data: { status: CallStatus.DECLINED, endedAt: new Date() },
+          });
+          clearRingTimeout(callId);
+          io.to(`user:${call.callerId}`).emit('call:busy', { callId });
+        }
+      } catch (err) {
+        console.error('Socket call:busy error:', err);
+      }
+    });
 
     // Disconnect handler — only triggers offline after ALL sockets disconnect
     socket.on('disconnect', async () => {

@@ -32,6 +32,13 @@ const envSchema = z.object({
 
   // Expo push notifications
   EXPO_ACCESS_TOKEN: z.string().optional(),
+
+  // ── LiveKit (required for voice/video calling) ──────────────────────────
+  // Set these in the Render environment before enabling calling features.
+  // Server still starts without them; call endpoints return 503 when missing.
+  LIVEKIT_API_KEY: z.string().optional(),
+  LIVEKIT_API_SECRET: z.string().optional(),
+  LIVEKIT_URL: z.string().optional(), // e.g. wss://your-project.livekit.cloud
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -43,3 +50,11 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+// Warn at startup if LiveKit is not configured (non-fatal)
+if (!env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET || !env.LIVEKIT_URL) {
+  console.warn(
+    '⚠️  LiveKit env vars (LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL) are not set.' +
+    ' Voice/video calling will be unavailable until they are configured.'
+  );
+}
