@@ -99,8 +99,15 @@ export function setupSockets(app: FastifyInstance): SocketIOServer {
       origin: env.CORS_ORIGINS.split(',').map((o) => o.trim()),
       credentials: true,
     },
-    pingTimeout: 30000,
-    pingInterval: 25000,
+    // Heartbeat tuning:
+    // - The server sends a ping every pingInterval ms.
+    // - If the client doesn't pong within pingTimeout ms, the socket is
+    //   considered dead and disconnected.
+    // - Effective offline detection window ≈ pingInterval + pingTimeout.
+    // - At 10s + 20s = ~30s maximum before the disconnect handler fires.
+    //   (Previously 25s + 30s = ~55s.)
+    pingInterval: 10000,
+    pingTimeout: 20000,
   });
 
   // Store singleton reference for external broadcast helpers
