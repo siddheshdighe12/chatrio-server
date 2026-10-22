@@ -14,13 +14,16 @@ import { prisma } from '../config/prisma.js';
 import { CallStatus, CallType } from '../types/database.js';
 import {
   authorizeDirectCall,
+  authorizeGroupCall,
   getCallForParticipant,
+  getGroupCallForMember,
   assertValidTransition,
   generateLiveKitToken,
   isLiveKitConfigured,
   scheduleRingTimeout,
   clearRingTimeout,
   notifyIncomingCall,
+  notifyIncomingGroupCall,
 } from '../services/call.service.js';
 import { getIO } from '../sockets/index.js';
 
@@ -35,6 +38,14 @@ const initiateSchema = z.object({
 
 const callIdParamSchema = z.object({
   callId: z.string().uuid(),
+});
+
+const groupCallIdParamSchema = z.object({
+  groupCallId: z.string().uuid(),
+});
+
+const conversationIdParamSchema = z.object({
+  conversationId: z.string().uuid(),
 });
 
 const historyQuerySchema = z.object({
@@ -440,6 +451,398 @@ export async function getCallHistoryHandler(
     });
 
     return reply.send(calls);
+  } catch (err) {
+    return handleError(err, reply);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Group Call Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /calls/group/initiate
+ * Initiates a group call or joins if an active one already exists.
+ */
+export async function initiateGroupCallHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const user = request.currentUser!;
+
+  const parsed = initiateSchema.safeParse(request.body);
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.errors[0]?.message || 'Validation error' });
+  }
+
+  const { conversationId, callType } = parsed.data;
+
+  try {
+    if (!isLiveKitConfigured()) {
+      return reply.status(503).send({
+        error: 'Calling is not available. LiveKit is not configured on the server.',
+      });
+    }
+
+    const { conversation } = await authorizeGroupCall(conversationId, user.id);
+
+    // Check if there is already an active group call for this conversation
+    const existingGroupCall = await prisma.groupCall.findFirst({
+      where: { conversationId, status: 'ACTIVE' },
+    });
+
+    if (existingGroupCall) {
+      // User joins the existing active group call
+      await prisma.groupCallParticipant.upsert({
+        where: {
+          groupCallId_userId: {
+            groupCallId: existingGroupCall.id,
+            userId: user.id,
+          },
+        },
+        create: {
+          groupCallId: existingGroupCall.id,
+          userId: user.id,
+          isActive: true,
+          joinedAt: new Date(),
+        },
+        update: {
+          isActive: true,
+          leftAt: null,
+          joinedAt: new Date(),
+        },
+      });
+
+      const { token, serverUrl } = await generateLiveKitToken(
+        user.id,
+        user.displayName,
+        existingGroupCall.livekitRoom,
+      );
+
+      const io = getIO();
+      if (io) {
+        io.to(`conversation:${conversationId}`).emit('group-call:participant-joined', {
+          groupCallId: existingGroupCall.id,
+          conversationId,
+          user: {
+            id: user.id,
+            displayName: user.displayName,
+            avatarUrl: user.avatarUrl,
+          },
+        });
+      }
+
+      return reply.send({
+        groupCallId: existingGroupCall.id,
+        livekitRoom: existingGroupCall.livekitRoom,
+        token,
+        serverUrl,
+        callType: existingGroupCall.callType,
+        conversationId,
+        isExisting: true,
+      });
+    }
+
+    // Otherwise, create a brand new GroupCall
+    const groupCall = await prisma.groupCall.create({
+      data: {
+        conversationId,
+        initiatorId: user.id,
+        callType,
+        status: 'ACTIVE',
+        livekitRoom: '', // updated below to id
+      },
+    });
+
+    const updatedGroupCall = await prisma.groupCall.update({
+      where: { id: groupCall.id },
+      data: { livekitRoom: groupCall.id },
+    });
+
+    await prisma.groupCallParticipant.create({
+      data: {
+        groupCallId: updatedGroupCall.id,
+        userId: user.id,
+        isActive: true,
+      },
+    });
+
+    const { token, serverUrl } = await generateLiveKitToken(
+      user.id,
+      user.displayName,
+      updatedGroupCall.livekitRoom,
+    );
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${conversationId}`).emit('group-call:started', {
+        groupCallId: updatedGroupCall.id,
+        conversationId,
+        callType,
+        initiator: {
+          id: user.id,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+        },
+        activeParticipants: [
+          {
+            id: user.id,
+            displayName: user.displayName,
+            avatarUrl: user.avatarUrl,
+          },
+        ],
+      });
+    }
+
+    notifyIncomingGroupCall({
+      groupCallId: updatedGroupCall.id,
+      conversationId,
+      groupName: conversation.name || 'Group Chat',
+      initiatorName: user.displayName,
+      callType,
+      excludeUserId: user.id,
+    });
+
+    return reply.status(201).send({
+      groupCallId: updatedGroupCall.id,
+      livekitRoom: updatedGroupCall.livekitRoom,
+      token,
+      serverUrl,
+      callType,
+      conversationId,
+      isExisting: false,
+    });
+  } catch (err) {
+    return handleError(err, reply);
+  }
+}
+
+/**
+ * POST /calls/group/:groupCallId/join
+ * Join an active group call.
+ */
+export async function joinGroupCallHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const user = request.currentUser!;
+
+  const paramsParsed = groupCallIdParamSchema.safeParse(request.params);
+  if (!paramsParsed.success) {
+    return reply.status(400).send({ error: 'Invalid group call ID' });
+  }
+
+  const { groupCallId } = paramsParsed.data;
+
+  try {
+    const groupCall = await getGroupCallForMember(groupCallId, user.id);
+
+    if (groupCall.status !== 'ACTIVE') {
+      return reply.status(409).send({ error: 'Group call has ended' });
+    }
+
+    await prisma.groupCallParticipant.upsert({
+      where: {
+        groupCallId_userId: {
+          groupCallId,
+          userId: user.id,
+        },
+      },
+      create: {
+        groupCallId,
+        userId: user.id,
+        isActive: true,
+        joinedAt: new Date(),
+      },
+      update: {
+        isActive: true,
+        leftAt: null,
+        joinedAt: new Date(),
+      },
+    });
+
+    const { token, serverUrl } = await generateLiveKitToken(
+      user.id,
+      user.displayName,
+      groupCall.livekitRoom,
+    );
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${groupCall.conversationId}`).emit('group-call:participant-joined', {
+        groupCallId,
+        conversationId: groupCall.conversationId,
+        user: {
+          id: user.id,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+        },
+      });
+    }
+
+    return reply.send({
+      groupCallId,
+      livekitRoom: groupCall.livekitRoom,
+      token,
+      serverUrl,
+      callType: groupCall.callType,
+      conversationId: groupCall.conversationId,
+    });
+  } catch (err) {
+    return handleError(err, reply);
+  }
+}
+
+/**
+ * POST /calls/group/:groupCallId/leave
+ * Participant leaves an active group call.
+ */
+export async function leaveGroupCallHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const user = request.currentUser!;
+
+  const paramsParsed = groupCallIdParamSchema.safeParse(request.params);
+  if (!paramsParsed.success) {
+    return reply.status(400).send({ error: 'Invalid group call ID' });
+  }
+
+  const { groupCallId } = paramsParsed.data;
+
+  try {
+    const groupCall = await getGroupCallForMember(groupCallId, user.id);
+
+    await prisma.groupCallParticipant.updateMany({
+      where: { groupCallId, userId: user.id, isActive: true },
+      data: { isActive: false, leftAt: new Date() },
+    });
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${groupCall.conversationId}`).emit('group-call:participant-left', {
+        groupCallId,
+        conversationId: groupCall.conversationId,
+        userId: user.id,
+      });
+    }
+
+    // If no active participants remain, end the group call
+    const remainingCount = await prisma.groupCallParticipant.count({
+      where: { groupCallId, isActive: true },
+    });
+
+    if (remainingCount === 0 && groupCall.status === 'ACTIVE') {
+      await prisma.groupCall.update({
+        where: { id: groupCallId },
+        data: { status: 'ENDED', endedAt: new Date() },
+      });
+
+      if (io) {
+        io.to(`conversation:${groupCall.conversationId}`).emit('group-call:ended', {
+          groupCallId,
+          conversationId: groupCall.conversationId,
+        });
+      }
+    }
+
+    return reply.send({ success: true, remaining: remainingCount });
+  } catch (err) {
+    return handleError(err, reply);
+  }
+}
+
+/**
+ * POST /calls/group/:groupCallId/end
+ * Call initiator or group admin ends the call for everyone.
+ */
+export async function endGroupCallHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const user = request.currentUser!;
+
+  const paramsParsed = groupCallIdParamSchema.safeParse(request.params);
+  if (!paramsParsed.success) {
+    return reply.status(400).send({ error: 'Invalid group call ID' });
+  }
+
+  const { groupCallId } = paramsParsed.data;
+
+  try {
+    const groupCall = await getGroupCallForMember(groupCallId, user.id);
+
+    const userMembership = groupCall.conversation.members.find((m) => m.userId === user.id);
+    const isInitiator = groupCall.initiatorId === user.id;
+    const isAdmin = userMembership?.role === 'ADMIN' || userMembership?.role === 'OWNER';
+
+    if (!isInitiator && !isAdmin) {
+      return reply.status(403).send({ error: 'Only the initiator or a group admin can end this group call' });
+    }
+
+    await prisma.groupCall.update({
+      where: { id: groupCallId },
+      data: { status: 'ENDED', endedAt: new Date() },
+    });
+
+    await prisma.groupCallParticipant.updateMany({
+      where: { groupCallId, isActive: true },
+      data: { isActive: false, leftAt: new Date() },
+    });
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${groupCall.conversationId}`).emit('group-call:ended', {
+        groupCallId,
+        conversationId: groupCall.conversationId,
+        endedBy: user.id,
+      });
+    }
+
+    return reply.send({ success: true });
+  } catch (err) {
+    return handleError(err, reply);
+  }
+}
+
+/**
+ * GET /calls/group/active/:conversationId
+ * Fetches the currently active group call for a conversation, if any.
+ */
+export async function getActiveGroupCallHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const user = request.currentUser!;
+
+  const paramsParsed = conversationIdParamSchema.safeParse(request.params);
+  if (!paramsParsed.success) {
+    return reply.status(400).send({ error: 'Invalid conversation ID' });
+  }
+
+  const { conversationId } = paramsParsed.data;
+
+  try {
+    await authorizeGroupCall(conversationId, user.id);
+
+    const activeCall = await prisma.groupCall.findFirst({
+      where: { conversationId, status: 'ACTIVE' },
+      include: {
+        initiator: {
+          select: { id: true, displayName: true, avatarUrl: true },
+        },
+        participants: {
+          where: { isActive: true },
+          include: {
+            user: {
+              select: { id: true, displayName: true, avatarUrl: true },
+            },
+          },
+        },
+      },
+    });
+
+    return reply.send({ activeCall });
   } catch (err) {
     return handleError(err, reply);
   }

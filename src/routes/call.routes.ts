@@ -7,12 +7,18 @@ import {
   cancelCallHandler,
   endCallHandler,
   getCallHistoryHandler,
+  initiateGroupCallHandler,
+  joinGroupCallHandler,
+  leaveGroupCallHandler,
+  endGroupCallHandler,
+  getActiveGroupCallHandler,
 } from '../controllers/call.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
 
 export async function callRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticate);
 
+  // ── One-to-one calls ────────────────────────────────────────────────────────
   // POST /calls/initiate — start a new call
   app.post('/initiate', initiateCallHandler);
 
@@ -33,4 +39,20 @@ export async function callRoutes(app: FastifyInstance) {
 
   // GET /calls/history/:id — get call history for a conversation
   app.get('/history/:id', getCallHistoryHandler);
+
+  // ── Group calls ─────────────────────────────────────────────────────────────
+  // POST /calls/group/initiate — start or join active group call
+  app.post('/group/initiate', initiateGroupCallHandler);
+
+  // POST /calls/group/:groupCallId/join — join existing group call
+  app.post('/group/:groupCallId/join', joinGroupCallHandler);
+
+  // POST /calls/group/:groupCallId/leave — participant leaves group call
+  app.post('/group/:groupCallId/leave', leaveGroupCallHandler);
+
+  // POST /calls/group/:groupCallId/end — initiator/admin ends group call for all
+  app.post('/group/:groupCallId/end', endGroupCallHandler);
+
+  // GET /calls/group/active/:conversationId — get active group call for a conversation
+  app.get('/group/active/:conversationId', getActiveGroupCallHandler);
 }

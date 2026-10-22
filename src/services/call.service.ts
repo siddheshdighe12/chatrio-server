@@ -275,3 +275,141 @@ export async function notifyIncomingCall(opts: {
     console.error('[Call] Failed to dispatch incoming call push notification:', err);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Group Call helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Verify that:
+ *  1. The conversation exists and is of type GROUP.
+ *  2. The authenticated user is an active member.
+ */
+export async function authorizeGroupCall(
+  conversationId: string,
+  authenticatedUserId: string,
+) {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    include: {
+      members: {
+        where: { isActive: true },
+        select: { userId: true, role: true },
+      },
+    },
+  });
+
+  if (!conversation) {
+    throw Object.assign(new Error('Conversation not found'), { statusCode: 404 });
+  }
+
+  if (conversation.type !== 'GROUP') {
+    throw Object.assign(new Error('Group calls are only supported in group conversations'), { statusCode: 400 });
+  }
+
+  const membership = conversation.members.find((m) => m.userId === authenticatedUserId);
+  if (!membership) {
+    throw Object.assign(new Error('Not a member of this group conversation'), { statusCode: 403 });
+  }
+
+  return { conversation, membership };
+}
+
+/**
+ * Resolve a group call record and verify the requesting user is an active member of the group.
+ */
+export async function getGroupCallForMember(groupCallId: string, userId: string) {
+  const groupCall = await prisma.groupCall.findUnique({
+    where: { id: groupCallId },
+    include: {
+      conversation: {
+        include: {
+          members: {
+            where: { isActive: true },
+            select: { userId: true, role: true },
+          },
+        },
+      },
+      initiator: {
+        select: { id: true, displayName: true, avatarUrl: true },
+      },
+      participants: {
+        include: {
+          user: {
+            select: { id: true, displayName: true, avatarUrl: true },
+          },
+        },
+      },
+    },
+  });
+
+  if (!groupCall) {
+    throw Object.assign(new Error('Group call not found'), { statusCode: 404 });
+  }
+
+  const isMember = groupCall.conversation.members.some((m) => m.userId === userId);
+  if (!isMember) {
+    throw Object.assign(new Error('Not an authorized member of this group call'), { statusCode: 403 });
+  }
+
+  return groupCall;
+}
+
+/**
+ * Send incoming group-call push notifications to all other active group members.
+ */
+export async function notifyIncomingGroupCall(opts: {
+  groupCallId: string;
+  conversationId: string;
+  groupName: string;
+  initiatorName: string;
+  callType: string;
+  excludeUserId: string;
+}): Promise<void> {
+  const { groupCallId, conversationId, groupName, initiatorName, callType, excludeUserId } = opts;
+
+  try {
+    const members = await prisma.conversationMember.findMany({
+      where: {
+        conversationId,
+        isActive: true,
+        userId: { not: excludeUserId },
+      },
+      select: { userId: true },
+    });
+
+    const userIds = members.map((m) => m.userId);
+    if (userIds.length === 0) return;
+
+    const tokens = await prisma.pushToken.findMany({
+      where: { userId: { in: userIds } },
+      select: { token: true },
+    });
+
+    if (tokens.length === 0) return;
+
+    const callTypeLabel = callType === CallType.VIDEO ? 'group video call' : 'group audio call';
+
+    const messages: PushMessage[] = tokens.map((t) => ({
+      to: t.token,
+      title: groupName || 'Group Call',
+      body: `${initiatorName} started a ${callTypeLabel}`,
+      sound: 'default',
+      channelId: 'calls',
+      data: {
+        type: 'incoming_group_call',
+        groupCallId,
+        callType,
+        conversationId,
+        groupName,
+        initiatorName,
+      },
+    }));
+
+    sendPushNotifications(messages).catch((err) =>
+      console.error('[Call] notifyIncomingGroupCall error:', err)
+    );
+  } catch (err) {
+    console.error('[Call] Failed to dispatch group call push notifications:', err);
+  }
+}

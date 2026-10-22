@@ -34,6 +34,8 @@ model User {
   blockedBy           BlockedUser[]        @relation("UserBlockedBy")
   callerCalls         Call[]               @relation("CallerCalls")
   recipientCalls      Call[]               @relation("RecipientCalls")
+  initiatedGroupCalls GroupCall[]          @relation("GroupCallInitiator")
+  groupCallParticipations GroupCallParticipant[] @relation("GroupCallParticipants")
 
   @@index([username])
   @@index([email])
@@ -81,9 +83,10 @@ model Conversation {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  members  ConversationMember[]
-  messages Message[]
-  calls    Call[]
+  members    ConversationMember[]
+  messages   Message[]
+  calls      Call[]
+  groupCalls GroupCall[]
 
   @@index([type])
   @@index([updatedAt])
@@ -263,4 +266,45 @@ model Call {
   @@index([status])
   @@index([createdAt])
   @@map("calls")
+}
+
+// ── Group Voice / Video Calls ────────────────────────────────────────────────
+
+model GroupCall {
+  id             String    @id @default(uuid())
+  conversationId String                         // must be GROUP conversation
+  initiatorId    String                         // user who started the call
+  callType       String    @default("AUDIO")    // AUDIO | VIDEO
+  status         String    @default("ACTIVE")   // ACTIVE | ENDED
+  livekitRoom    String    @unique              // room name = groupCall id
+  startedAt      DateTime  @default(now())
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  conversation Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  initiator    User                  @relation("GroupCallInitiator", fields: [initiatorId], references: [id])
+  participants GroupCallParticipant[]
+
+  @@index([conversationId])
+  @@index([initiatorId])
+  @@index([status])
+  @@map("group_calls")
+}
+
+model GroupCallParticipant {
+  id          String    @id @default(uuid())
+  groupCallId String
+  userId      String
+  joinedAt    DateTime  @default(now())
+  leftAt      DateTime?
+  isActive    Boolean   @default(true)
+
+  groupCall GroupCall @relation(fields: [groupCallId], references: [id], onDelete: Cascade)
+  user      User      @relation("GroupCallParticipants", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupCallId, userId])
+  @@index([groupCallId])
+  @@index([userId])
+  @@map("group_call_participants")
 }

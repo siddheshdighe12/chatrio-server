@@ -2,7 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../config/prisma.js';
 import { ConversationType, MemberRole, MessageType } from '../types/database.js';
-import { isUserOnline } from '../sockets/index.js';
+import { isUserOnline, getIO } from '../sockets/index.js';
 import { normalizeMediaUrl } from '../utils/media.js';
 
 const directConvSchema = z.object({
@@ -331,7 +331,7 @@ export async function updateGroupHandler(request: FastifyRequest, reply: Fastify
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
   });
 
-  if (!membership || (membership.role !== MemberRole.OWNER && membership.role !== MemberRole.ADMIN)) {
+  if (!membership || !membership.isActive || (membership.role !== MemberRole.OWNER && membership.role !== MemberRole.ADMIN)) {
     return reply.status(403).send({ error: 'Only group owners or admins can update group settings' });
   }
 
@@ -342,6 +342,11 @@ export async function updateGroupHandler(request: FastifyRequest, reply: Fastify
     where: { id },
     data: result.data,
   });
+
+  const io = getIO();
+  if (io) {
+    io.to(`conversation:${id}`).emit('conversation:updated', updated);
+  }
 
   return reply.send(updated);
 }
@@ -425,12 +430,39 @@ export async function deleteConversationHandler(request: FastifyRequest, reply: 
   const currentUserId = request.currentUser?.id;
   if (!currentUserId) return reply.status(401).send({ error: 'Unauthorized' });
 
-  const member = await prisma.conversationMember.findUnique({
-    where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
+  const conv = await prisma.conversation.findUnique({
+    where: { id },
+    include: {
+      members: {
+        where: { userId: currentUserId },
+      },
+    },
   });
+  if (!conv) return reply.status(404).send({ error: 'Conversation not found' });
+
+  const member = conv.members[0];
   if (!member) return reply.status(403).send({ error: 'Not a member' });
 
-  // Soft-delete: mark member as inactive
+  if (conv.type === ConversationType.GROUP) {
+    // Only the group owner can permanently delete/disband the group
+    if (member.role !== MemberRole.OWNER) {
+      return reply.status(403).send({ error: 'Only the group owner can delete the group' });
+    }
+
+    // Cascade deletes conversation, its members, messages, and attachments
+    await prisma.conversation.delete({
+      where: { id },
+    });
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${id}`).emit('conversation:deleted', { conversationId: id });
+    }
+
+    return reply.send({ ok: true });
+  }
+
+  // For direct conversations: soft-delete by deactivating caller's membership
   await prisma.conversationMember.update({
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
     data: { isActive: false, leftAt: new Date() },
@@ -480,18 +512,21 @@ export async function addMembersHandler(request: FastifyRequest, reply: FastifyR
   const currentUserId = request.currentUser?.id;
   if (!currentUserId) return reply.status(401).send({ error: 'Unauthorized' });
 
-  const body = request.body as { memberIds: string[] };
-  if (!body?.memberIds?.length) return reply.status(400).send({ error: 'No member IDs provided' });
+  const body = request.body as { memberIds?: string[]; userIds?: string[] };
+  const targetIds = body?.memberIds || body?.userIds;
+  if (!Array.isArray(targetIds) || !targetIds.length) {
+    return reply.status(400).send({ error: 'No member IDs provided' });
+  }
 
   const myMembership = await prisma.conversationMember.findUnique({
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
   });
-  if (!myMembership || (myMembership.role !== MemberRole.OWNER && myMembership.role !== MemberRole.ADMIN)) {
+  if (!myMembership || !myMembership.isActive || (myMembership.role !== MemberRole.OWNER && myMembership.role !== MemberRole.ADMIN)) {
     return reply.status(403).send({ error: 'Only admins can add members' });
   }
 
   const addedMembers = [];
-  for (const uid of body.memberIds) {
+  for (const uid of targetIds) {
     try {
       const m = await prisma.conversationMember.upsert({
         where: { conversationId_userId: { conversationId: id, userId: uid } },
@@ -503,9 +538,9 @@ export async function addMembersHandler(request: FastifyRequest, reply: FastifyR
     } catch {}
   }
 
-  // System message
+  // System message & socket broadcast
   if (addedMembers.length > 0) {
-    await prisma.message.create({
+    const sysMsg = await prisma.message.create({
       data: {
         conversationId: id,
         senderId: null,
@@ -513,7 +548,22 @@ export async function addMembersHandler(request: FastifyRequest, reply: FastifyR
         content: `${addedMembers.length} member(s) added to the group`,
         metadata: JSON.stringify({ event: 'MEMBERS_ADDED', actorId: currentUserId }),
       },
+      include: {
+        sender: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+        attachments: true,
+        reactions: true,
+      },
     });
+
+    const io = getIO();
+    if (io) {
+      io.to(`conversation:${id}`).emit('message:new', sysMsg);
+      io.to(`conversation:${id}`).emit('conversation:members_updated', {
+        conversationId: id,
+        event: 'MEMBERS_ADDED',
+        members: addedMembers,
+      });
+    }
   }
 
   return reply.send({ ok: true, added: addedMembers.length });
@@ -527,22 +577,56 @@ export async function removeMemberHandler(request: FastifyRequest, reply: Fastif
   const myMembership = await prisma.conversationMember.findUnique({
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
   });
-  if (!myMembership || (myMembership.role !== MemberRole.OWNER && myMembership.role !== MemberRole.ADMIN)) {
+  if (!myMembership || !myMembership.isActive || (myMembership.role !== MemberRole.OWNER && myMembership.role !== MemberRole.ADMIN)) {
     return reply.status(403).send({ error: 'Only admins can remove members' });
   }
 
   // Protect owner
   const targetMembership = await prisma.conversationMember.findUnique({
     where: { conversationId_userId: { conversationId: id, userId } },
+    include: { user: { select: { displayName: true } } },
   });
-  if (targetMembership?.role === MemberRole.OWNER) {
+  if (!targetMembership || !targetMembership.isActive) {
+    return reply.status(404).send({ error: 'Member not found in this group' });
+  }
+  if (targetMembership.role === MemberRole.OWNER) {
     return reply.status(403).send({ error: 'Cannot remove the group owner' });
+  }
+  // Admin cannot remove another admin unless they are owner
+  if (targetMembership.role === MemberRole.ADMIN && myMembership.role !== MemberRole.OWNER) {
+    return reply.status(403).send({ error: 'Only group owners can remove other admins' });
   }
 
   await prisma.conversationMember.update({
     where: { conversationId_userId: { conversationId: id, userId } },
     data: { isActive: false, leftAt: new Date() },
   });
+
+  const removedName = targetMembership.user?.displayName || 'A member';
+  const sysMsg = await prisma.message.create({
+    data: {
+      conversationId: id,
+      senderId: null,
+      type: MessageType.SYSTEM,
+      content: `${removedName} was removed from the group`,
+      metadata: JSON.stringify({ event: 'MEMBER_REMOVED', targetUserId: userId, actorId: currentUserId }),
+    },
+    include: {
+      sender: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      attachments: true,
+      reactions: true,
+    },
+  });
+
+  const io = getIO();
+  if (io) {
+    io.to(`conversation:${id}`).emit('message:new', sysMsg);
+    io.to(`conversation:${id}`).emit('conversation:members_updated', {
+      conversationId: id,
+      event: 'MEMBER_REMOVED',
+      userId,
+    });
+  }
 
   return reply.send({ ok: true });
 }
@@ -555,7 +639,7 @@ export async function updateMemberRoleHandler(request: FastifyRequest, reply: Fa
   const myMembership = await prisma.conversationMember.findUnique({
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
   });
-  if (!myMembership || myMembership.role !== MemberRole.OWNER) {
+  if (!myMembership || !myMembership.isActive || myMembership.role !== MemberRole.OWNER) {
     return reply.status(403).send({ error: 'Only the group owner can change roles' });
   }
 
@@ -566,8 +650,18 @@ export async function updateMemberRoleHandler(request: FastifyRequest, reply: Fa
 
   const updated = await prisma.conversationMember.update({
     where: { conversationId_userId: { conversationId: id, userId } },
-    data: { role: body.role },
+    data: { role: body.role as MemberRole },
   });
+
+  const io = getIO();
+  if (io) {
+    io.to(`conversation:${id}`).emit('conversation:members_updated', {
+      conversationId: id,
+      event: 'ROLE_UPDATED',
+      userId,
+      role: updated.role,
+    });
+  }
 
   return reply.send({ ok: true, role: updated.role });
 }
@@ -580,7 +674,7 @@ export async function leaveGroupHandler(request: FastifyRequest, reply: FastifyR
   const membership = await prisma.conversationMember.findUnique({
     where: { conversationId_userId: { conversationId: id, userId: currentUserId } },
   });
-  if (!membership) return reply.status(403).send({ error: 'Not a member' });
+  if (!membership || !membership.isActive) return reply.status(403).send({ error: 'Not an active member' });
 
   if (membership.role === MemberRole.OWNER) {
     // If owner is leaving, promote the next admin or member to owner
@@ -603,7 +697,7 @@ export async function leaveGroupHandler(request: FastifyRequest, reply: FastifyR
     data: { isActive: false, leftAt: new Date() },
   });
 
-  await prisma.message.create({
+  const sysMsg = await prisma.message.create({
     data: {
       conversationId: id,
       senderId: null,
@@ -611,7 +705,22 @@ export async function leaveGroupHandler(request: FastifyRequest, reply: FastifyR
       content: `${request.currentUser?.displayName || 'User'} left the group`,
       metadata: JSON.stringify({ event: 'MEMBER_LEFT', actorId: currentUserId }),
     },
+    include: {
+      sender: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      attachments: true,
+      reactions: true,
+    },
   });
+
+  const io = getIO();
+  if (io) {
+    io.to(`conversation:${id}`).emit('message:new', sysMsg);
+    io.to(`conversation:${id}`).emit('conversation:members_updated', {
+      conversationId: id,
+      event: 'MEMBER_LEFT',
+      userId: currentUserId,
+    });
+  }
 
   return reply.send({ ok: true });
 }
